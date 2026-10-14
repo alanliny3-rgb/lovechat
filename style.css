@@ -10,7 +10,7 @@ body{margin:0;font-family:Inter,Segoe UI,Arial,system-ui;background:var(--bg);co
 .btn{background:var(--accent);color:#fff;border:none;padding:8px 12px;border-radius:12px;cursor:pointer;transition:0.2s;box-shadow:0 2px 8px rgba(43,156,255,0.22)}
 .btn:hover{opacity:0.85}
 .btn.small{padding:6px 8px;font-size:13px}
-.btn.outline{background:white;border:1px solid #e6eef8;color:var(--accent)}
+.btn.outline{background:white;border:1px solid #e6eef8;color:var(--accent);box-shadow:none}
 .small{font-size:12px;color:var(--muted)}
 .muted{color:var(--muted)}
 .app{max-width:480px;margin:0 auto;background:transparent;min-height:100vh;padding-bottom:72px}
@@ -126,7 +126,8 @@ input,textarea{border-radius:12px}
 input:not([type=file]),textarea{border:1px solid #e6eef8;background:#fff}
 input:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(43,156,255,0.12)}
 .icon-btn{width:42px;padding:8px 10px;border-radius:12px;background:#eef3fb;color:var(--accent);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;border:none;transition:0.2s}
-.icon-btn:hover{background:#e3edf9}
+.icon-btn:hover{background:#eef3fb}
+.icon-btn.active{background:#dce8f7}
 .icon-btn .icon{width:18px;height:18px}
 .nav-btn:hover .icon{animation:iconBounce .5s ease}
 @keyframes iconBounce{0%,100%{transform:translateY(0)}35%{transform:translateY(-3px) scale(1.08)}70%{transform:translateY(0) scale(1.03)}}

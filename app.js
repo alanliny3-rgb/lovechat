@@ -890,7 +890,10 @@
   // --------------- 事件绑定：图片选择 & 自动上传 ---------------
   const btnMore = document.getElementById('btnMore');
   const imageRow = document.getElementById('imageRow');
-  if (btnMore && imageRow) btnMore.addEventListener('click', () => imageRow.classList.toggle('open'));
+  if (btnMore && imageRow) btnMore.addEventListener('click', () => {
+    imageRow.classList.toggle('open');
+    btnMore.classList.toggle('active');
+  });
 
   const btnSendImage = document.getElementById('btnSendImage');
   if (btnSendImage && imgUpload) btnSendImage.addEventListener('click', () => imgUpload.click());
