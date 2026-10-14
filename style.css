@@ -123,6 +123,8 @@ textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #e6eef8;resi
 /* ===== 可爱化细节 ===== */
 .btn:active{transform:scale(0.96)}
 input,textarea{border-radius:12px}
+/* 防止手机端点击输入框时页面自动放大：字号需 ≥16px */
+input,select,textarea{font-size:16px}
 input:not([type=file]),textarea{border:1px solid #e6eef8;background:#fff}
 input:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(43,156,255,0.12)}
 .icon-btn{width:42px;padding:8px 10px;border-radius:12px;background:#eef3fb;color:var(--accent);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;border:none;transition:0.2s}
