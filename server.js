@@ -321,8 +321,10 @@ io.on('connection', socket => {
     const { from, to, message, type } = data;
     if (!from || !to || !message) return;
 
+    // 优先使用前端生成的时间戳（毫秒），保证发送回执能与前端消息行精确匹配；旧客户端未传时回退服务器时间
+    const ts = Number.isFinite(data.ts) ? data.ts : Date.now();
+
     try {
-      const ts = Date.now();
       const ins = await pool.query(
         'INSERT INTO messages(from_user,to_user,message,type,ts) VALUES($1,$2,$3,$4,$5) RETURNING id',
         [from, to, message, type || 'text', ts]);
@@ -353,6 +355,8 @@ io.on('connection', socket => {
       socket.emit('message-sent-ack', { ts, id: msgId });
     } catch (err) {
       console.error('send-message ERR:', err);
+      // 发送失败回执：前端把该条消息标记为失败
+      socket.emit('message-send-failed', { ts });
     }
   });
 

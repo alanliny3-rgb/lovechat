@@ -79,6 +79,19 @@
       }
     });
     localStorage.setItem('chat_unreadMap', JSON.stringify(unreadMap));
+    updateTotalBadge();
+  }
+
+  // 底部"消息"Tab 未读角标 + 标签页标题提示
+  function updateTotalBadge() {
+    let total = 0;
+    Object.keys(unreadMap).forEach(k => { total += (Number(unreadMap[k]) || 0); });
+    const badge = document.getElementById('navMsgBadge');
+    if (badge) {
+      badge.textContent = total > 99 ? '99+' : (total || '');
+      badge.style.display = total > 0 ? 'block' : 'none';
+    }
+    document.title = total > 0 ? `(${total}) アイチャット` : 'アイチャット';
   }
 
   let myAvatar = '';
@@ -199,12 +212,13 @@
         updateConversationRedDot(data.from);
       }
 
-      // 桌面通知
-      if (Notification.permission === 'granted') {
-        const n = new Notification(data.from, {
+      // 桌面通知（先确认浏览器支持，避免旧环境抛错）
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        const notiOpts = {
           body: data.type === 'image' ? '[图片]' : (data.message.length > 50 ? data.message.slice(0, 50) + '…' : data.message),
-          icon: avatarCache[data.from] || '/favicon.png',
-        });
+        };
+        if (avatarCache[data.from]) notiOpts.icon = avatarCache[data.from];
+        const n = new Notification(data.from, notiOpts);
         n.onclick = () => {
           window.focus();
           openConversation(data.from);
@@ -216,12 +230,24 @@
       updateConversationPreview(data.from, {
         from_user: data.from, message: data.message, type: data.type, ts: data.ts
       });
+      // 同步写入本地缓存
+      appendMsgToCache(data.from, { from_user: data.from, message: data.message, type: data.type || 'text', ts: data.ts });
     });
 
     // 发送成功回执：清除"发送中"状态
     socket.on('message-sent-ack', ack => {
       const row = chatWindow.querySelector(`.msg-row[data-ts="${ack.ts}"]`);
       if (row) row.classList.remove('msg-sending');
+    });
+
+    // 发送失败回执：标记该条消息失败并提示
+    socket.on('message-send-failed', ack => {
+      const row = ack && ack.ts ? chatWindow.querySelector(`.msg-row[data-ts="${ack.ts}"]`) : null;
+      if (row) {
+        row.classList.remove('msg-sending');
+        row.classList.add('msg-failed');
+      }
+      toast('消息发送失败', 'error');
     });
   }
 
@@ -338,9 +364,18 @@
 
         const preview = document.createElement('div');
         preview.className = 'small muted conv-preview';
-        preview.textContent = c.last ?
+        const previewText = document.createElement('span');
+        previewText.className = 'conv-preview-text';
+        previewText.textContent = c.last ?
           ((c.last.from_user === currentUser ? '你: ' : '') + (c.last.type === 'image' ? '[图片]' : truncate(c.last.message, 40)))
           : '暂无消息';
+        preview.appendChild(previewText);
+        if (c.last && c.last.ts) {
+          const timeSpan = document.createElement('span');
+          timeSpan.className = 'conv-preview-time';
+          timeSpan.textContent = formatConvTime(c.last.ts);
+          preview.appendChild(timeSpan);
+        }
 
         tc.appendChild(title);
         tc.appendChild(preview);
@@ -371,11 +406,43 @@
     }
     const preview = div.querySelector('.conv-preview');
     if (preview && lastMsg) {
-      preview.textContent = (lastMsg.from_user === currentUser ? '你: ' : '') +
-        (lastMsg.type === 'image' ? '[图片]' : truncate(lastMsg.message || '', 40));
+      const pt = preview.querySelector('.conv-preview-text');
+      if (pt) {
+        pt.textContent = (lastMsg.from_user === currentUser ? '你: ' : '') +
+          (lastMsg.type === 'image' ? '[图片]' : truncate(lastMsg.message || '', 40));
+      }
+      const timeSpan = preview.querySelector('.conv-preview-time');
+      if (timeSpan) timeSpan.textContent = formatConvTime(lastMsg.ts);
     }
     // 挪到最上面
     conversationsList.insertBefore(div, conversationsList.firstChild);
+  }
+
+  // --------------- 会话消息本地缓存（打开会话秒开，不白屏） ---------------
+  const msgCache = {};
+  function loadMsgCache(friend) {
+    try {
+      const raw = localStorage.getItem('chat_msgs_' + friend);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) { msgCache[friend] = arr; return arr; }
+      }
+    } catch (e) {}
+    return [];
+  }
+  function saveMsgCache(friend) {
+    try {
+      const arr = msgCache[friend] || [];
+      localStorage.setItem('chat_msgs_' + friend, JSON.stringify(arr.slice(-200)));
+    } catch (e) {}
+  }
+  function appendMsgToCache(friend, m) {
+    try {
+      if (!msgCache[friend]) msgCache[friend] = loadMsgCache(friend);
+      msgCache[friend].push(m);
+      if (msgCache[friend].length > 300) msgCache[friend] = msgCache[friend].slice(-300);
+      saveMsgCache(friend);
+    } catch (e) {}
   }
 
   function openConversation(friend) {
@@ -390,6 +457,12 @@
     if (friendRemarkDisplay) friendRemarkDisplay.textContent = (found && found.remark) ? found.remark : '';
     if (chatTitle) chatTitle.textContent = (found && found.remark) ? found.remark : friend;
     if (chatWindow) chatWindow.innerHTML = '';
+    lastMsgDateKey = null;
+
+    // 先渲染本地缓存，避免白屏等待网络
+    const cached = loadMsgCache(friend);
+    cached.forEach(m => addMessageToWindow(m.from_user, m.message, m.ts));
+    if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
 
     chatState.oldestId = null;
     chatState.hasMore = true;
@@ -398,10 +471,21 @@
     fetch(`/messages/${encodeURIComponent(currentUser)}/${encodeURIComponent(friend)}?limit=200`)
       .then(r => r.json())
       .then(list => {
+        // 以服务器最新数据整体替换，并刷新缓存
+        if (chatWindow) chatWindow.innerHTML = '';
+        lastMsgDateKey = null;
+        msgCache[friend] = list.map(m => ({ from_user: m.from_user, message: m.message, type: m.type || 'text', ts: m.ts }));
+        saveMsgCache(friend);
         list.forEach(m => addMessageToWindow(m.from_user, m.message, m.ts));
         if (list.length) chatState.oldestId = list[0].id;
         if (list.length < 200) chatState.hasMore = false;
-        chatWindow.scrollTop = chatWindow.scrollHeight;
+        if (!list.length && !cached.length && chatWindow) {
+          const empty = document.createElement('div');
+          empty.className = 'msg-empty-hint';
+          empty.textContent = '暂无消息，打个招呼吧~';
+          chatWindow.appendChild(empty);
+        }
+        if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
       })
       .catch(() => { })
       .finally(() => { chatState.loading = false; });
@@ -485,7 +569,8 @@
     if (!text && text !== '') return document.createTextNode('');
 
     const frag = document.createDocumentFragment();
-    const urlRegex = /https?:\/\/[^\s]+/g;
+    // 同时识别绝对链接和本站 /uploads/ 相对路径（上传的图片/视频）
+    const urlRegex = /https?:\/\/[^\s]+|\/uploads\/[^\s]+/g;
     let lastIndex = 0;
     let match;
     while ((match = urlRegex.exec(text)) !== null) {
@@ -554,14 +639,29 @@
   }
 
   function formatTs(ts) {
-    if (!ts) return '';
-    const d = new Date(ts);
+    if (ts === null || ts === undefined || ts === '') return '';
+    // 数据库 BIGINT 时间戳可能以字符串返回，统一转成数字，避免 new Date("1699...") 解析失败变成 NaN
+    const n = typeof ts === 'number' ? ts : Number(ts);
+    if (!isFinite(n)) return '';
+    const d = new Date(n);
     const now = new Date();
-    const pad = n => String(n).padStart(2, '0');
+    const pad = n2 => String(n2).padStart(2, '0');
     const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
     if (d.toDateString() === now.toDateString()) return hm;
     if (d.getFullYear() === now.getFullYear()) return `${d.getMonth()+1}月${d.getDate()}日 ${hm}`;
     return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日 ${hm}`;
+  }
+
+  // 会话列表的"最后消息时间"：今天显示时分，今天以前显示日期
+  function formatConvTime(ts) {
+    const n = typeof ts === 'number' ? ts : Number(ts);
+    if (!isFinite(n)) return '';
+    const d = new Date(n);
+    const now = new Date();
+    const pad = x => String(x).padStart(2, '0');
+    if (d.toDateString() === now.toDateString()) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    if (d.getFullYear() === now.getFullYear()) return `${d.getMonth()+1}月${d.getDate()}日`;
+    return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()}`;
   }
 
   // 构建单条消息行；sending=true 时显示"发送中"加载态
@@ -625,10 +725,38 @@
 
   function addMessageToWindow(sender, text, ts, sending = false) {
     if(!chatWindow) return null;
+    maybeInsertDateSep(ts);
     const row = buildMessageRow(sender, text, ts, sending);
     chatWindow.appendChild(row);
     chatWindow.scrollTop = chatWindow.scrollHeight;
     return row;
+  }
+
+  // --------------- 消息日期分组（微信式分隔条） ---------------
+  let lastMsgDateKey = null;
+  function maybeInsertDateSep(ts) {
+    if (ts === null || ts === undefined || ts === '') return;
+    const n = typeof ts === 'number' ? ts : Number(ts);
+    if (!isFinite(n)) return;
+    const d = new Date(n);
+    const key = d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate();
+    if (key === lastMsgDateKey) return;
+    lastMsgDateKey = key;
+    const sep = document.createElement('div');
+    sep.className = 'msg-date-sep';
+    sep.textContent = dateLabel(n);
+    chatWindow.appendChild(sep);
+  }
+  function dateLabel(ts) {
+    const d = new Date(ts);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const diff = Math.round((today - that) / 86400000);
+    if (diff === 0) return '今天';
+    if (diff === 1) return '昨天';
+    if (d.getFullYear() === now.getFullYear()) return `${d.getMonth()+1}月${d.getDate()}日`;
+    return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
   }
 
   async function loadEarlierMessages() {
@@ -657,11 +785,12 @@
     if (!text) return;
     if (!socket || !socket.connected) { toast('连接已断开，消息未发送'); return; }
     const ts = Date.now();
-    const payload = { from: currentUser, to: currentFriend, message: text };
+    const payload = { from: currentUser, to: currentFriend, message: text, ts };
     socket.emit('send-message', payload);
     // 本地先渲染，带"发送中"态，等 ack 后去掉
     addMessageToWindow(currentUser, text, ts, true);
     updateConversationPreview(currentFriend, { from_user: currentUser, message: text, type: 'text', ts });
+    appendMsgToCache(currentFriend, { from_user: currentUser, message: text, type: 'text', ts });
     if(msgInput) msgInput.value = '';
   }
 
@@ -705,9 +834,10 @@
       // 替换占位气泡为真实图片消息
       if (placeholder) placeholder.remove();
       addMessageToWindow(currentUser, url, ts, true);
-      const payload = { from: currentUser, to: currentFriend, message: url, type: 'image' };
+      const payload = { from: currentUser, to: currentFriend, message: url, type: 'image', ts };
       socket.emit('send-message', payload);
       updateConversationPreview(currentFriend, { from_user: currentUser, message: url, type: 'image', ts });
+      appendMsgToCache(currentFriend, { from_user: currentUser, message: url, type: 'image', ts });
       fileInput.value = '';
     });
   }
@@ -745,7 +875,9 @@
       const fileInput = e.target;
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
-      const url = await uploadImage(file);
+      // 头像上传前自动压缩，避免大图上传慢/占空间
+      const compressed = await compressImage(file, 300);
+      const url = await uploadImage(compressed);
       if (!url) { toast('头像上传失败', 'error'); fileInput.value = ''; return; }
       avatarInput.value = url;
       try {
@@ -770,6 +902,12 @@
 
   function refreshNotifyStatus() {
     if (!notifyStatus || !btnNotifyToggle) return;
+    if (typeof Notification === 'undefined') {
+      notifyStatus.textContent = '当前浏览器不支持通知功能';
+      notifyStatus.style.color = '';
+      btnNotifyToggle.style.display = 'none';
+      return;
+    }
     const p = Notification.permission;
     if (p === 'granted') {
       notifyStatus.textContent = '已开启，收到新消息会弹系统通知';
@@ -829,8 +967,8 @@
         unreadMap = {};
         localStorage.removeItem('chat_unreadMap');
         connectSocket();
-        // 登录后立刻请求通知权限（用户刚交互过，浏览器允许弹）
-        if (Notification.permission === 'default') Notification.requestPermission();
+        // 注意：不在登录后自动请求通知权限——浏览器只认"用户主动点击"触发的请求，
+        // 自动请求会被忽略甚至被记成拒绝，导致之后点"开启通知"不再弹窗。改为用户在按钮上主动开启。
         await loadFriends();
         throttleLoadConversations();
         meNote.value = DEV_NOTE;
@@ -855,8 +993,7 @@
       unreadMap = {};
       localStorage.removeItem('chat_unreadMap');
       connectSocket();
-      // 自动登录后也请求一次通知权限
-      if (Notification.permission === 'default') Notification.requestPermission();
+      // 与登录一致：不自动请求通知权限，避免浏览器忽略/误拒后按钮失效
       loadFriends().then(()=>{ throttleLoadConversations(); });
       meNote.value = DEV_NOTE;
       showApp();

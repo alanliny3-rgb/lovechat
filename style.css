@@ -24,12 +24,12 @@ body{margin:0;font-family:Inter,Segoe UI,Arial,system-ui;background:var(--bg);co
 .composer{display:flex; flex-direction: column;gap:8px;padding:8px 0}
 .composer input{flex:1;padding:10px;border-radius:10px;border:1px solid #e6eef8}
 .list{max-height:36vh;overflow:auto}
-.panel{background:var(--card);border-radius:12px;padding:10px;margin-bottom:10px;}
+.panel{background:var(--card);border-radius:12px;padding:10px;margin-bottom:10px;border:1px solid #e9eef5}
 .pad{padding:12px}
 .profile-row{display:flex;gap:8px;align-items:center}
 .avatar-wrap{width:52px;height:52px;border-radius:50%;overflow:hidden;background:#e2e8f0;display:flex;align-items:center;justify-content:center}
 .avatar-wrap img{width:100%;height:100%;object-fit:cover}
-.avatar-initial{font-weight:600;color:#334155;text-align:center;line-height:52px;font-size:18px}
+.avatar-initial{font-weight:600;color:#334155;display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:18px}
 .friend{display:flex;align-items:center;justify-content:space-between;padding:10px;border-radius:10px;cursor:pointer}
 .friend:hover{background:#f2f6fb}
 .unread{background:#ff4d6d;color:white;border-radius:12px;padding:2px 8px;font-size:12px}
@@ -40,7 +40,7 @@ body{margin:0;font-family:Inter,Segoe UI,Arial,system-ui;background:var(--bg);co
 .msg-row{display:flex;align-items:flex-end;gap:8px}
 .msg-right{justify-content:flex-end}
 .msg-left{justify-content:flex-start}
-.bottom-nav{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:space-around;padding:8px;background:#fff;border-top:1px solid #eee}
+.bottom-nav{position:fixed;left:50%;transform:translateX(-50%);bottom:0;width:100%;max-width:480px;display:flex;justify-content:space-around;padding:8px;background:#fff;border-top:1px solid #eee;border-radius:14px 14px 0 0;box-shadow:0 -4px 16px rgba(15,23,42,0.06)}
 .nav-btn{background:none;border:none;padding:8px;color:var(--muted);font-weight:600}
 .nav-btn.active{color:var(--accent)}
 textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #e6eef8;resize:vertical}
@@ -122,6 +122,7 @@ textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #e6eef8;resi
 /* ===== 可爱化细节 ===== */
 .btn:active{transform:scale(0.96)}
 input,textarea{border-radius:12px}
+input:not([type=file]),textarea{border:1px solid #e6eef8;background:#fff}
 input:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(43,156,255,0.12)}
 .icon-btn{width:42px;padding:8px 10px;border-radius:12px;background:#eef3fb;color:var(--accent);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;border:none;transition:0.2s}
 .icon-btn:hover{background:#e3edf9}
@@ -151,6 +152,8 @@ input:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 
 
 /* ===== 消息发送中状态 ===== */
 .msg-sending .bubble{opacity:.65}
+.msg-failed .bubble{border:1.5px solid #ef4444;color:#ef4444;opacity:.85}
+.msg-failed .msg-time{color:#ef4444}
 .msg-spinner{width:14px;height:14px;border:2px solid #cbd5e1;border-top-color:var(--accent);border-radius:50%;margin-top:4px;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
@@ -161,3 +164,26 @@ input:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 
 .msg-left .msg-copy-btn{left:0}
 .msg-col:hover .msg-copy-btn{opacity:1}
 .msg-copy-btn:hover{background:#f2f6fb;color:var(--accent)}
+
+/* ===== 消息日期分隔条 ===== */
+.msg-date-sep{text-align:center;font-size:11px;color:#a7b0ba;margin:12px 0 4px}
+.msg-date-sep:first-child{margin-top:0}
+
+/* ===== 空会话提示 ===== */
+.msg-empty-hint{text-align:center;color:#c0c7cf;font-size:13px;margin-top:35vh}
+
+/* ===== 会话列表：最后消息 + 时间 ===== */
+.conv-preview{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.conv-preview-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.conv-preview-time{font-size:11px;color:#c0c7cf;flex-shrink:0}
+
+/* ===== 底部导航未读角标 ===== */
+.nav-btn{position:relative}
+.nav-badge{position:absolute;top:2px;right:calc(50% - 24px);min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#ff4d6d;color:#fff;font-size:10px;line-height:16px;text-align:center;box-sizing:border-box;display:none}
+
+/* ===== 新消息淡入 + 细滚动条 ===== */
+.msg-row{animation:msgIn .18s ease}
+@keyframes msgIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-thumb{background:#d3dae3;border-radius:3px}
+::-webkit-scrollbar-track{background:transparent}
