@@ -82,7 +82,27 @@
     updateTotalBadge();
   }
 
-  // 底部"消息"Tab 未读角标 + 标签页标题提示
+  // --------------- 标签页图标（favicon）：默认空心爱心，有未读时空心/实心交替闪烁 ---------------
+  const FAV_HOLLOW = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ff7ba9' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M19 14c1.5-1.5 3-3.2 3-5.5A5.5 5.5 0 0 0 16.5 3C14.7 3 13.5 3.5 12 5c-1.5-1.5-2.7-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4 3 5.5l7 7 7-7z'/%3E%3C/svg%3E";
+  const FAV_SOLID = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23ff7ba9'%3E%3Cpath d='M19 14c1.5-1.5 3-3.2 3-5.5A5.5 5.5 0 0 0 16.5 3C14.7 3 13.5 3.5 12 5c-1.5-1.5-2.7-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4 3 5.5l7 7 7-7z'/%3E%3C/svg%3E";
+  let _favTimer = null;
+  let _favSolid = false;
+  function setFavicon(solid) {
+    const link = document.querySelector('link[rel="icon"]');
+    if (link) link.href = solid ? FAV_SOLID : FAV_HOLLOW;
+  }
+  function updateFaviconFlash(hasUnread) {
+    if (hasUnread) {
+      if (_favTimer) return;
+      _favTimer = setInterval(() => { _favSolid = !_favSolid; setFavicon(_favSolid); }, 600);
+    } else {
+      if (_favTimer) { clearInterval(_favTimer); _favTimer = null; }
+      setFavicon(false);
+    }
+  }
+  setFavicon(false); // 初始：空心
+
+  // 底部"消息"Tab 未读角标 + 标签页标题 + favicon 闪烁
   function updateTotalBadge() {
     let total = 0;
     Object.keys(unreadMap).forEach(k => { total += (Number(unreadMap[k]) || 0); });
@@ -91,6 +111,7 @@
       badge.textContent = total > 99 ? '99+' : (total || '');
       badge.style.display = total > 0 ? 'block' : 'none';
     }
+    updateFaviconFlash(total > 0);
     document.title = total > 0 ? `(${total}) アイチャット` : 'アイチャット';
   }
 
@@ -205,9 +226,10 @@
 
     socket.on('receive-message', data => {
       if (!data || !data.from) return;
-      addMessageToWindow(data.from, data.message, data.ts);
-
-      if (currentFriend !== data.from) {
+      // 只把消息渲染进当前打开的会话窗口；其他会话只累计未读（避免消息串进错误的窗口）
+      if (currentFriend === data.from) {
+        addMessageToWindow(data.from, data.message, data.ts);
+      } else {
         unreadMap[data.from] = (unreadMap[data.from] || 0) + 1;
         updateConversationRedDot(data.from);
       }
@@ -234,10 +256,14 @@
       appendMsgToCache(data.from, { from_user: data.from, message: data.message, type: data.type || 'text', ts: data.ts });
     });
 
-    // 发送成功回执：清除"发送中"状态
+    // 发送成功回执：清除"发送中"状态（类 + 转圈元素一起移除，转圈才不会一直转）
     socket.on('message-sent-ack', ack => {
-      const row = chatWindow.querySelector(`.msg-row[data-ts="${ack.ts}"]`);
-      if (row) row.classList.remove('msg-sending');
+      const row = ack && ack.ts ? chatWindow.querySelector(`.msg-row[data-ts="${ack.ts}"]`) : null;
+      if (row) {
+        row.classList.remove('msg-sending');
+        const spin = row.querySelector('.msg-spinner');
+        if (spin) spin.remove();
+      }
     });
 
     // 发送失败回执：标记该条消息失败并提示
@@ -245,6 +271,8 @@
       const row = ack && ack.ts ? chatWindow.querySelector(`.msg-row[data-ts="${ack.ts}"]`) : null;
       if (row) {
         row.classList.remove('msg-sending');
+        const spin = row.querySelector('.msg-spinner');
+        if (spin) spin.remove();
         row.classList.add('msg-failed');
       }
       toast('消息发送失败', 'error');
@@ -324,11 +352,71 @@
     });
   }
 
-  // 用单接口拉所有会话（每个好友最后一条消息）
+  // 创建一条会话列表行（仅在该好友首次出现在列表里时新建节点）
+  function createConversationRow(c) {
+    const div = document.createElement('div');
+    div.className = 'friend';
+    div.dataset.friend = c.friend;
+
+    const left = document.createElement('div');
+    left.style.display = 'flex';
+    left.style.alignItems = 'center';
+    left.style.gap = '10px';
+    left.appendChild(makeAvatarDOM(c.friend, c.avatar || '', 44));
+
+    const tc = document.createElement('div');
+    const title = document.createElement('div');
+    title.innerHTML = c.remark ? `${escapeHTML(c.remark)} (${escapeHTML(c.friend)})` : escapeHTML(c.friend);
+
+    const preview = document.createElement('div');
+    preview.className = 'small muted conv-preview';
+    const previewText = document.createElement('span');
+    previewText.className = 'conv-preview-text';
+    preview.appendChild(previewText);
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'conv-preview-time';
+    preview.appendChild(timeSpan);
+
+    tc.appendChild(title);
+    tc.appendChild(preview);
+    left.appendChild(tc);
+    div.appendChild(left);
+
+    const dot = document.createElement('div');
+    dot.className = 'red-dot';
+    div.appendChild(dot);
+
+    div.addEventListener('click', () => openConversation(c.friend));
+
+    updateConversationRow(div, c);
+    return div;
+  }
+
+  // 更新已有行的预览文字/时间/红点——不销毁节点、不重载头像，因此不闪
+  function updateConversationRow(div, c) {
+    const preview = div.querySelector('.conv-preview');
+    if (preview) {
+      const pt = preview.querySelector('.conv-preview-text');
+      if (pt) {
+        pt.textContent = c.last ?
+          ((c.last.from_user === currentUser ? '你: ' : '') + (c.last.type === 'image' ? '[图片]' : truncate(c.last.message || '', 40)))
+          : '暂无消息';
+      }
+      const ts = preview.querySelector('.conv-preview-time');
+      if (ts) ts.textContent = (c.last && c.last.ts) ? formatConvTime(c.last.ts) : '';
+    }
+    const count = unreadMap[c.friend] || 0;
+    const dot = div.querySelector('.red-dot');
+    if (dot) {
+      dot.style.visibility = count > 0 ? 'visible' : 'hidden';
+      dot.textContent = count > 99 ? '99+' : (count || '');
+    }
+  }
+
+  // 拉所有会话（每个好友最后一条消息）——缓存制：列表已有时做增量合并，节点不重建，头像不重载，避免闪烁
   async function loadConversations() {
     if (!currentUser || _isLoadingConversations) return;
     _isLoadingConversations = true;
-    conversationsList.innerHTML = '';
 
     try {
       if (!friends || !friends.length) await loadFriends();
@@ -344,54 +432,25 @@
           message: c.message, type: c.type, ts: c.ts, from_user: c.from_user
         } : null
       }));
-
       conv.sort((a,b) => (b.last ? b.last.ts : 0) - (a.last ? a.last.ts : 0));
 
-      conv.forEach(c => {
-        const div = document.createElement('div');
-        div.className = 'friend';
-        div.dataset.friend = c.friend;
-
-        const left = document.createElement('div');
-        left.style.display = 'flex';
-        left.style.alignItems = 'center';
-        left.style.gap = '10px';
-        left.appendChild(makeAvatarDOM(c.friend, c.avatar || '', 44));
-
-        const tc = document.createElement('div');
-        const title = document.createElement('div');
-        title.innerHTML = c.remark ? `${escapeHTML(c.remark)} (${escapeHTML(c.friend)})` : escapeHTML(c.friend);
-
-        const preview = document.createElement('div');
-        preview.className = 'small muted conv-preview';
-        const previewText = document.createElement('span');
-        previewText.className = 'conv-preview-text';
-        previewText.textContent = c.last ?
-          ((c.last.from_user === currentUser ? '你: ' : '') + (c.last.type === 'image' ? '[图片]' : truncate(c.last.message, 40)))
-          : '暂无消息';
-        preview.appendChild(previewText);
-        if (c.last && c.last.ts) {
-          const timeSpan = document.createElement('span');
-          timeSpan.className = 'conv-preview-time';
-          timeSpan.textContent = formatConvTime(c.last.ts);
-          preview.appendChild(timeSpan);
-        }
-
-        tc.appendChild(title);
-        tc.appendChild(preview);
-        left.appendChild(tc);
-        div.appendChild(left);
-
-        const count = unreadMap[c.friend] || 0;
-        const dot = document.createElement('div');
-        dot.className = 'red-dot';
-        dot.style.visibility = count > 0 ? 'visible' : 'hidden';
-        dot.textContent = count > 99 ? '99+' : (count || '');
-        div.appendChild(dot);
-
-        div.addEventListener('click', () => openConversation(c.friend));
-        conversationsList.appendChild(div);
-      });
+      if (conversationsList.children.length === 0) {
+        // 首次：整批创建
+        const frag = document.createDocumentFragment();
+        conv.forEach(c => frag.appendChild(createConversationRow(c)));
+        conversationsList.appendChild(frag);
+      } else {
+        // 已有列表：更新已有行、新建缺失行、按时间重排。
+        // appendChild 会把节点从原位置移走而非销毁重建，<img> 不会重新加载，因此不闪。
+        const frag = document.createDocumentFragment();
+        conv.forEach(c => {
+          let div = conversationsList.querySelector(`.friend[data-friend="${CSS.escape(c.friend)}"]`);
+          if (!div) div = createConversationRow(c);
+          else updateConversationRow(div, c);
+          frag.appendChild(div);
+        });
+        conversationsList.appendChild(frag);
+      }
 
     } catch (e) { console.error(e); }
     finally { _isLoadingConversations = false; }
@@ -401,7 +460,8 @@
   function updateConversationPreview(friend, lastMsg) {
     let div = conversationsList.querySelector(`.friend[data-friend="${CSS.escape(friend)}"]`);
     if (!div) {
-      // 会话列表还没渲染出来，等下次 loadConversations 自然带上
+      // 会话列表里还没有这一行（新会话或列表尚未加载）：静默刷新补上，未读红点/预览才会更新
+      throttleLoadConversations();
       return;
     }
     const preview = div.querySelector('.conv-preview');
@@ -446,7 +506,11 @@
   }
 
   function openConversation(friend) {
+    // 若窗口里已经是这位朋友的聊天（从会话列表返回后再点进来），不清空不重建，只后台拉增量
+    const alreadyHere = !!chatWindow && chatWindow.dataset.friend === friend && chatWindow.children.length > 0;
+
     currentFriend = friend;
+    if (chatWindow) chatWindow.dataset.friend = friend;
     unreadMap[friend] = 0;
     updateConversationRedDot(friend);
 
@@ -454,15 +518,21 @@
     if (socket && socket.connected) socket.emit('open-conversation', { user: currentUser, friend });
 
     const found = friends.find(x => x.friend === friend);
-    if (friendRemarkDisplay) friendRemarkDisplay.textContent = (found && found.remark) ? found.remark : '';
-    if (chatTitle) chatTitle.textContent = (found && found.remark) ? found.remark : friend;
-    if (chatWindow) chatWindow.innerHTML = '';
-    lastMsgDateKey = null;
+    const remark = (found && found.remark) || '';
+    // 上方大标题显示备注（无备注则显示昵称）；下方小字显示原始昵称，避免两行备注重复
+    if (chatTitle) chatTitle.textContent = remark || friend;
+    if (friendRemarkDisplay) friendRemarkDisplay.textContent = remark ? friend : '';
 
-    // 先渲染本地缓存，避免白屏等待网络
-    const cached = loadMsgCache(friend);
-    cached.forEach(m => addMessageToWindow(m.from_user, m.message, m.ts));
-    if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+    if (!alreadyHere) {
+      // 切到别的会话：清空窗口，先渲染本地缓存，秒开不白屏
+      if (chatWindow) chatWindow.innerHTML = '';
+      lastMsgDateKey = null;
+      const cached = loadMsgCache(friend);
+      cached.forEach(m => addMessageToWindow(m.from_user, m.message, m.ts));
+      // 缓存消息批量渲染，不播放淡入动画（此后实时/增量收到的新消息仍有动画）
+      chatWindow.querySelectorAll('.msg-row').forEach(r => { r.style.animation = 'none'; });
+      if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+    }
 
     chatState.oldestId = null;
     chatState.hasMore = true;
@@ -471,21 +541,40 @@
     fetch(`/messages/${encodeURIComponent(currentUser)}/${encodeURIComponent(friend)}?limit=200`)
       .then(r => r.json())
       .then(list => {
-        // 以服务器最新数据整体替换，并刷新缓存
-        if (chatWindow) chatWindow.innerHTML = '';
-        lastMsgDateKey = null;
-        msgCache[friend] = list.map(m => ({ from_user: m.from_user, message: m.message, type: m.type || 'text', ts: m.ts }));
+        if (!chatWindow || chatWindow.dataset.friend !== friend) return; // 用户已切到别的会话，丢弃这次结果
+
+        const serverMsgs = list.map(m => ({ from_user: m.from_user, message: m.message, type: m.type || 'text', ts: m.ts }));
+
+        // 当前已渲染消息的最大 ts：只追加比它更新的消息，已有 DOM 一律不动，避免清空重建导致闪烁
+        let lastTs = -1;
+        chatWindow.querySelectorAll('.msg-row').forEach(r => {
+          const t = Number(r.dataset.ts);
+          if (isFinite(t) && t > lastTs) lastTs = t;
+        });
+
+        let appended = false;
+        for (const m of list) {
+          const mts = Number(m.ts) || 0;
+          if (mts > lastTs) {
+            addMessageToWindow(m.from_user, m.message, m.ts);
+            appended = true;
+          }
+        }
+
+        // 以服务端数据为准刷新本地缓存
+        msgCache[friend] = serverMsgs;
         saveMsgCache(friend);
-        list.forEach(m => addMessageToWindow(m.from_user, m.message, m.ts));
+
         if (list.length) chatState.oldestId = list[0].id;
-        if (list.length < 200) chatState.hasMore = false;
-        if (!list.length && !cached.length && chatWindow) {
+        chatState.hasMore = list.length >= 200;
+
+        if (!list.length && !chatWindow.querySelector('.msg-empty-hint') && !chatWindow.querySelector('.msg-row')) {
           const empty = document.createElement('div');
           empty.className = 'msg-empty-hint';
           empty.textContent = '暂无消息，打个招呼吧~';
           chatWindow.appendChild(empty);
         }
-        if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+        if (appended) chatWindow.scrollTop = chatWindow.scrollHeight;
       })
       .catch(() => { })
       .finally(() => { chatState.loading = false; });

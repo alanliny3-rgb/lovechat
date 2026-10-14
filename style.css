@@ -36,8 +36,9 @@ body{margin:0;font-family:Inter,Segoe UI,Arial,system-ui;background:var(--bg);co
 .bubble{display:inline-block;padding:10px 14px;border-radius:16px;max-width:100%;line-height:1.2; white-space: pre-wrap;  word-break: break-word;}
 .bubble.me{background:#d2f0ff;margin-left:auto;border-bottom-right-radius:4px}
 .bubble.you{background:#f1f3f5;margin-right:auto;border-bottom-left-radius:4px}
-.msg-time{font-size:11px;color:#9aa3ad;margin-top:3px;text-align:right}
-.msg-row{display:flex;align-items:flex-end;gap:8px}
+.msg-time{position:absolute;top:100%;left:0;margin-top:3px;font-size:11px;color:#9aa3ad;text-align:left;white-space:nowrap;pointer-events:none}
+.msg-right .msg-time{left:auto;right:0;text-align:right}
+.msg-row{display:flex;align-items:center;gap:8px;padding-bottom:14px}
 .msg-right{justify-content:flex-end}
 .msg-left{justify-content:flex-start}
 .bottom-nav{position:fixed;left:50%;transform:translateX(-50%);bottom:0;width:100%;max-width:480px;display:flex;justify-content:space-around;padding:8px;background:#fff;border-top:1px solid #eee;border-radius:14px 14px 0 0;box-shadow:0 -4px 16px rgba(15,23,42,0.06)}
@@ -138,10 +139,14 @@ input:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 
 .msg-right .msg-col{align-items:flex-end}
 .msg-col .bubble{max-width:100%}
 
-/* 输入区：⊕ 点击展开图片工具栏 */
-.composer .image-send{margin:0;overflow:hidden;max-height:0;opacity:0;transition:max-height .25s ease,opacity .2s ease,margin .2s}
-.composer .image-send.open{max-height:56px;opacity:1}
-.composer .image-send .btn{margin-top:6px}
+/* 输入区：⊕ 点击后"发送图片"按钮在发送按钮同一行，从右侧滑出 */
+.composer .image-send{
+  margin:0;padding:0;max-width:0;opacity:0;overflow:hidden;
+  transform:translateX(18px);flex-shrink:0;
+  transition:max-width .22s ease,opacity .18s ease,transform .22s ease;
+}
+.composer .image-send.open{max-width:150px;opacity:1;transform:translateX(0)}
+.composer .image-send .btn{margin:0;white-space:nowrap}
 
 /* ===== Toast 提示 ===== */
 #toast-container{position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:99999;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
@@ -154,7 +159,11 @@ input:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 
 .msg-sending .bubble{opacity:.65}
 .msg-failed .bubble{border:1.5px solid #ef4444;color:#ef4444;opacity:.85}
 .msg-failed .msg-time{color:#ef4444}
-.msg-spinner{width:14px;height:14px;border:2px solid #cbd5e1;border-top-color:var(--accent);border-radius:50%;margin-top:4px;animation:spin .8s linear infinite}
+.msg-spinner{position:absolute;top:100%;right:0;width:14px;height:14px;border:2px solid #cbd5e1;border-top-color:var(--accent);border-radius:50%;margin-top:4px;animation:spin .8s linear infinite}
+/* 转圈只在"发送中"的行显示，收到回执后立即隐藏，避免一直转 */
+.msg-row .msg-spinner{display:none}
+.msg-row.msg-sending .msg-spinner{display:block}
+.msg-left .msg-spinner{right:auto;left:0}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* ===== 消息气泡复制按钮（hover 显示） ===== */
