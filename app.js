@@ -1,0 +1,881 @@
+// app.js — 优化版（本地预览更新 + toast + 上传进度 + 发送状态 + 局部刷新）
+(() => {
+  // --------------- DOM 元素 ---------------
+  const loginView = document.getElementById('loginView');
+  const app = document.getElementById('app');
+  const navBtns = Array.from(document.querySelectorAll('.nav-btn'));
+  const tabs = Array.from(document.querySelectorAll('.tab.view'));
+  const btnRegister = document.getElementById('btn-register');
+  const btnLogin = document.getElementById('btn-login');
+  const btnLogout = document.getElementById('btn-logout');
+
+  // messages tab
+  const conversationsPanel = document.getElementById('conversationsPanel');
+  const chatPanel = document.getElementById('chatPanel');
+  const conversationsList = document.getElementById('conversationsList');
+  const chatTitle = document.getElementById('chatTitle');
+  const friendRemarkDisplay = document.getElementById('friendRemarkDisplay');
+  const backToConvos = document.getElementById('backToConvos');
+  if (backToConvos) {
+    backToConvos.addEventListener('click', () => {
+      showConversationsPanel();
+    });
+  }
+
+  const chatWindow = document.getElementById('chatWindow');
+  const msgInput = document.getElementById('msgInput');
+  const btnSendText = document.getElementById('btnSendText');
+
+  // 历史消息分页状态
+  const chatState = { oldestId: null, hasMore: true, loading: false };
+
+  if (chatWindow) {
+    chatWindow.addEventListener('scroll', () => {
+      if (chatWindow.scrollTop <= 20 && currentFriend) loadEarlierMessages();
+    });
+  }
+
+  const imgUpload = document.getElementById('imgUpload');
+
+  // contacts tab
+  const newFriendInput = document.getElementById('newFriend');
+  const btnAdd = document.getElementById('btn-add');
+  const friendsList = document.getElementById('friendsList');
+
+  // me tab
+  const meAvatarWrap = document.getElementById('meAvatarWrap');
+  const avatarInput = document.getElementById('avatarInput');
+  const btnSaveAvatar = document.getElementById('btnSaveAvatar');
+  const meNote = document.getElementById('meNote');
+  const DEV_NOTE = meNote.value;
+
+  // --------------- 状态 ---------------
+  let currentUser = null;
+  let currentFriend = null;
+  let friends = [];
+  let onlineSet = new Set(); // 当前在线用户集合，局部更新用
+
+  let unreadMap = {};
+  const storedUnread = localStorage.getItem('chat_unreadMap');
+  if (storedUnread) {
+    try {
+      unreadMap = JSON.parse(storedUnread);
+      Object.keys(unreadMap).forEach(k => {
+        if (typeof unreadMap[k] === 'boolean') unreadMap[k] = unreadMap[k] ? 1 : 0;
+      });
+    } catch(e) { unreadMap = {}; }
+  }
+
+  function updateConversationRedDot(friend) {
+    const count = unreadMap[friend] || 0;
+    const divs = conversationsList.querySelectorAll('.friend');
+    divs.forEach(div => {
+      if (div.dataset.friend === friend) {
+        const dot = div.querySelector('.red-dot');
+        if (dot) {
+          dot.style.visibility = count > 0 ? 'visible' : 'hidden';
+          dot.textContent = count > 99 ? '99+' : (count || '');
+        }
+      }
+    });
+    localStorage.setItem('chat_unreadMap', JSON.stringify(unreadMap));
+  }
+
+  let myAvatar = '';
+  const avatarCache = {};
+  let socket = null;
+
+  // throttle / mutex
+  let _loadConvTimer = null;
+  let _isLoadingConversations = false;
+  function throttleLoadConversations() {
+    if (_isLoadingConversations) return;
+    if (_loadConvTimer) return;
+    _loadConvTimer = setTimeout(() => {
+      _loadConvTimer = null;
+      loadConversations();
+    }, 50);
+  }
+
+  // --------------- toast（替代 alert）---------------
+  function toast(msg, type = 'info') {
+    if (!msg) return;
+    let container = document.getElementById('toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'toast-container';
+      document.body.appendChild(container);
+    }
+    const t = document.createElement('div');
+    t.className = 'toast toast-' + type;
+    t.textContent = msg;
+    container.appendChild(t);
+    requestAnimationFrame(() => t.classList.add('show'));
+    setTimeout(() => {
+      t.classList.remove('show');
+      setTimeout(() => t.remove(), 300);
+    }, 2200);
+  }
+
+  // --------------- UI helpers ---------------
+  function showLogin() { if(loginView) loginView.style.display='block'; if(app) app.style.display='none'; document.title='アイチャット'; }
+  function showApp() { if(loginView) loginView.style.display='none'; if(app) app.style.display='block'; }
+  function switchTab(targetId){
+    tabs.forEach(t => t.id === targetId ? t.classList.add('active') : t.classList.remove('active'));
+    navBtns.forEach(b => b.dataset.target === targetId ? b.classList.add('active') : b.classList.remove('active'));
+    if(targetId === 'tab-messages') throttleLoadConversations();
+  }
+  navBtns.forEach(b => b.addEventListener('click', ()=> switchTab(b.dataset.target)));
+
+  function escapeHTML(s){ if(!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function truncate(s,n){ if(!s) return ''; return s.length>n?s.slice(0,n-1)+'…':s; }
+
+  // avatar
+  function makeInitialsDiv(username, size=52){
+    const d = document.createElement('div');
+    d.className = 'avatar-initial';
+    d.style.width = size + 'px';
+    d.style.height = size + 'px';
+    const initials = (username||'?').trim().split(/\s+/).map(s=>s[0]).slice(0,2).join('').toUpperCase() || '?';
+    d.textContent = initials;
+    return d;
+  }
+  function makeAvatarDOM(username, url, size=52){
+    const wrapper = document.createElement('div');
+    wrapper.style.width = size + 'px';
+    wrapper.style.height = size + 'px';
+    wrapper.className = 'avatar-wrap';
+    if(url && url.trim()){
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = username;
+      img.loading = 'lazy';
+      img.onerror = ()=>{ wrapper.innerHTML=''; wrapper.appendChild(makeInitialsDiv(username,size)); };
+      wrapper.appendChild(img);
+    } else wrapper.appendChild(makeInitialsDiv(username,size));
+    return wrapper;
+  }
+  function renderMyAvatar(){ if(!meAvatarWrap) return; meAvatarWrap.innerHTML=''; meAvatarWrap.appendChild(makeAvatarDOM(currentUser,myAvatar,52)); }
+
+  function showConversationsPanel(){ if(conversationsPanel) conversationsPanel.style.display=''; if(chatPanel) chatPanel.style.display='none'; if(chatPanel) chatPanel.classList.remove('chat-panel-full'); window.currentFriend = null; }
+  function showChatPanelFull(){ if(conversationsPanel) conversationsPanel.style.display='none'; if(chatPanel) chatPanel.style.display=''; if(chatPanel) chatPanel.classList.add('chat-panel-full'); }
+
+  // -------- Socket ---------------
+  function connectSocket(){
+    if(socket){ try{ socket.off(); socket.disconnect(); }catch(e){} socket=null; }
+    socket = io();
+
+    socket.on('connect', () => { if(currentUser) socket.emit('login', currentUser); });
+
+    socket.on('unread-counts', counts => {
+      counts.forEach(item => {
+        unreadMap[item.from_user] = item.count > 0 ? item.count : 0;
+        updateConversationRedDot(item.from_user);
+      });
+    });
+
+    // 在线状态：局部更新好友列表里的状态文字，不全量重渲染
+    socket.on('online-status', list => {
+      onlineSet = new Set(list || []);
+      window.onlineUsersList = Array.from(onlineSet);
+      friendsList.querySelectorAll('.friend').forEach(div => {
+        const f = div.dataset.friend;
+        if (!f) return;
+        const sub = div.querySelector('.small.muted');
+        if (sub) {
+          const online = onlineSet.has(f);
+          sub.textContent = online ? '在线' : '离线';
+          sub.style.color = online ? '#22c55e' : '';
+        }
+      });
+    });
+
+    socket.on('receive-message', data => {
+      if (!data || !data.from) return;
+      addMessageToWindow(data.from, data.message, data.ts);
+
+      if (currentFriend !== data.from) {
+        unreadMap[data.from] = (unreadMap[data.from] || 0) + 1;
+        updateConversationRedDot(data.from);
+      }
+
+      // 桌面通知
+      if (Notification.permission === 'granted') {
+        const n = new Notification(data.from, {
+          body: data.type === 'image' ? '[图片]' : (data.message.length > 50 ? data.message.slice(0, 50) + '…' : data.message),
+          icon: avatarCache[data.from] || '/favicon.png',
+        });
+        n.onclick = () => {
+          window.focus();
+          openConversation(data.from);
+          n.close();
+        };
+      }
+
+      // 本地更新会话预览，不再全量重拉
+      updateConversationPreview(data.from, {
+        from_user: data.from, message: data.message, type: data.type, ts: data.ts
+      });
+    });
+
+    // 发送成功回执：清除"发送中"状态
+    socket.on('message-sent-ack', ack => {
+      const row = chatWindow.querySelector(`.msg-row[data-ts="${ack.ts}"]`);
+      if (row) row.classList.remove('msg-sending');
+    });
+  }
+
+  // --------------- Friends / Conversations ---------------
+  async function loadFriends(){
+    if(!currentUser) return;
+    try{
+      const r = await fetch(`/friends/${encodeURIComponent(currentUser)}`);
+      const list = await r.json();
+      list.forEach(x=>{ if(x.avatar && x.avatar.trim()) avatarCache[x.friend]=x.avatar; });
+
+      friends = (list||[]).map(x=>({
+        friend: x.friend,
+        avatar: x.avatar || '',
+        remark: x.remark || ''
+      }));
+
+      renderContacts();
+    }catch(e){
+      friends=[];
+      renderContacts();
+    }
+  }
+
+  function renderContacts() {
+    if (!friendsList) return;
+    friendsList.innerHTML = '';
+
+    friends.forEach(item => {
+      const f = item.friend;
+      const av = avatarCache[f] || item.avatar || '';
+      const remark = item.remark || '';
+
+      const div = document.createElement('div');
+      div.className = 'friend';
+      div.dataset.friend = f;
+
+      const left = document.createElement('div');
+      left.style.display = 'flex';
+      left.style.gap = '10px';
+      left.style.alignItems = 'center';
+      left.appendChild(makeAvatarDOM(f, av, 44));
+
+      const txt = document.createElement('div');
+      const name = document.createElement('div');
+      name.innerHTML = remark ? `${escapeHTML(remark)} (${escapeHTML(f)})` : escapeHTML(f);
+
+      const sub = document.createElement('div');
+      sub.className = 'small muted';
+      const online = onlineSet.has(f);
+      sub.textContent = online ? '在线' : '离线';
+      if (online) sub.style.color = '#22c55e';
+
+      txt.appendChild(name);
+      txt.appendChild(sub);
+      left.appendChild(txt);
+      div.appendChild(left);
+
+      div.addEventListener('click', () => {
+        switchTab('tab-messages');
+        openConversation(f);
+      });
+
+      const editBtn = document.createElement('button');
+      editBtn.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20l.7-3.3L15.6 5.8a2.1 2.1 0 0 1 3 3L7.7 19.7 4 20z"/><path d="M14.2 7.2l3 3"/></svg>备注';
+      editBtn.className = 'edit-remark-btn';
+      editBtn.style.marginLeft = 'auto';
+      editBtn.style.padding = '4px 8px';
+      editBtn.style.fontSize = '12px';
+      editBtn.addEventListener('click', e => { e.stopPropagation(); editRemarkForFriend(f); });
+      div.appendChild(editBtn);
+
+      friendsList.appendChild(div);
+    });
+  }
+
+  // 用单接口拉所有会话（每个好友最后一条消息）
+  async function loadConversations() {
+    if (!currentUser || _isLoadingConversations) return;
+    _isLoadingConversations = true;
+    conversationsList.innerHTML = '';
+
+    try {
+      if (!friends || !friends.length) await loadFriends();
+
+      const r = await fetch(`/conversations/${encodeURIComponent(currentUser)}`);
+      const list = await r.json();
+
+      const conv = list.map(c => ({
+        friend: c.friend,
+        avatar: c.avatar || '',
+        remark: c.remark || '',
+        last: c.message ? {
+          message: c.message, type: c.type, ts: c.ts, from_user: c.from_user
+        } : null
+      }));
+
+      conv.sort((a,b) => (b.last ? b.last.ts : 0) - (a.last ? a.last.ts : 0));
+
+      conv.forEach(c => {
+        const div = document.createElement('div');
+        div.className = 'friend';
+        div.dataset.friend = c.friend;
+
+        const left = document.createElement('div');
+        left.style.display = 'flex';
+        left.style.alignItems = 'center';
+        left.style.gap = '10px';
+        left.appendChild(makeAvatarDOM(c.friend, c.avatar || '', 44));
+
+        const tc = document.createElement('div');
+        const title = document.createElement('div');
+        title.innerHTML = c.remark ? `${escapeHTML(c.remark)} (${escapeHTML(c.friend)})` : escapeHTML(c.friend);
+
+        const preview = document.createElement('div');
+        preview.className = 'small muted conv-preview';
+        preview.textContent = c.last ?
+          ((c.last.from_user === currentUser ? '你: ' : '') + (c.last.type === 'image' ? '[图片]' : truncate(c.last.message, 40)))
+          : '暂无消息';
+
+        tc.appendChild(title);
+        tc.appendChild(preview);
+        left.appendChild(tc);
+        div.appendChild(left);
+
+        const count = unreadMap[c.friend] || 0;
+        const dot = document.createElement('div');
+        dot.className = 'red-dot';
+        dot.style.visibility = count > 0 ? 'visible' : 'hidden';
+        dot.textContent = count > 99 ? '99+' : (count || '');
+        div.appendChild(dot);
+
+        div.addEventListener('click', () => openConversation(c.friend));
+        conversationsList.appendChild(div);
+      });
+
+    } catch (e) { console.error(e); }
+    finally { _isLoadingConversations = false; }
+  }
+
+  // 本地更新某条会话的预览文字，并把它挪到列表最上面（收到/发出消息时调用，不发请求）
+  function updateConversationPreview(friend, lastMsg) {
+    let div = conversationsList.querySelector(`.friend[data-friend="${CSS.escape(friend)}"]`);
+    if (!div) {
+      // 会话列表还没渲染出来，等下次 loadConversations 自然带上
+      return;
+    }
+    const preview = div.querySelector('.conv-preview');
+    if (preview && lastMsg) {
+      preview.textContent = (lastMsg.from_user === currentUser ? '你: ' : '') +
+        (lastMsg.type === 'image' ? '[图片]' : truncate(lastMsg.message || '', 40));
+    }
+    // 挪到最上面
+    conversationsList.insertBefore(div, conversationsList.firstChild);
+  }
+
+  function openConversation(friend) {
+    currentFriend = friend;
+    unreadMap[friend] = 0;
+    updateConversationRedDot(friend);
+
+    if (!currentUser) return;
+    if (socket && socket.connected) socket.emit('open-conversation', { user: currentUser, friend });
+
+    const found = friends.find(x => x.friend === friend);
+    if (friendRemarkDisplay) friendRemarkDisplay.textContent = (found && found.remark) ? found.remark : '';
+    if (chatTitle) chatTitle.textContent = (found && found.remark) ? found.remark : friend;
+    if (chatWindow) chatWindow.innerHTML = '';
+
+    chatState.oldestId = null;
+    chatState.hasMore = true;
+    chatState.loading = true;
+
+    fetch(`/messages/${encodeURIComponent(currentUser)}/${encodeURIComponent(friend)}?limit=200`)
+      .then(r => r.json())
+      .then(list => {
+        list.forEach(m => addMessageToWindow(m.from_user, m.message, m.ts));
+        if (list.length) chatState.oldestId = list[0].id;
+        if (list.length < 200) chatState.hasMore = false;
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+      })
+      .catch(() => { })
+      .finally(() => { chatState.loading = false; });
+
+    showChatPanelFull();
+  }
+
+  // --------------- 图片压缩 & 上传 ---------------
+  function compressImage(file, maxKB = 200) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      const reader = new FileReader();
+      reader.onerror = () => resolve(file);
+      img.onerror = () => resolve(file);
+      reader.onload = (e) => { img.src = e.target.result; };
+      img.onload = () => {
+        if (file.size / 1024 <= maxKB) { resolve(file); return; }
+
+        const MAX_EDGE = 1600;
+        let targetW = img.width;
+        let targetH = img.height;
+        if (targetW > MAX_EDGE || targetH > MAX_EDGE) {
+          const scale = Math.min(MAX_EDGE / targetW, MAX_EDGE / targetH);
+          targetW = Math.round(targetW * scale);
+          targetH = Math.round(targetH * scale);
+        }
+
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+
+        const sizeKB = file.size / 1024;
+        const ratio = sizeKB / maxKB;
+        let qualities;
+        if (ratio < 1.5) qualities = [0.9, 0.8];
+        else if (ratio < 3.0) qualities = [0.7, 0.6, 0.5];
+        else qualities = [0.5, 0.4, 0.3];
+
+        function compressAt(i, best) {
+          if (i >= qualities.length) { resolve(best || file); return; }
+          canvas.toBlob((blob) => {
+            if (!blob) { resolve(best || file); return; }
+            if (blob.size / 1024 <= maxKB) { resolve(blob); return; }
+            compressAt(i + 1, blob);
+          }, 'image/jpeg', qualities[i]);
+        }
+        compressAt(0, null);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // XHR 上传，带进度回调
+  function uploadImage(file, onProgress) {
+    return new Promise((resolve) => {
+      const fd = new FormData();
+      const ext = (file.type || '').includes('png') ? 'png' : 'jpg';
+      fd.append('file', file, 'img.' + ext);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/upload');
+      if (onProgress) {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) onProgress(Math.round(e.loaded / e.total * 100));
+        };
+      }
+      xhr.onload = () => {
+        try {
+          const j = JSON.parse(xhr.responseText);
+          resolve(j.success ? j.url : null);
+        } catch(e) { resolve(null); }
+      };
+      xhr.onerror = () => resolve(null);
+      xhr.send(fd);
+    });
+  }
+
+  // --------------- 消息渲染：URL/图片/视频识别 ---------------
+  function createMessageContentNode(text) {
+    if (!text && text !== '') return document.createTextNode('');
+
+    const frag = document.createDocumentFragment();
+    const urlRegex = /https?:\/\/[^\s]+/g;
+    let lastIndex = 0;
+    let match;
+    while ((match = urlRegex.exec(text)) !== null) {
+      const url = match[0];
+      const idx = match.index;
+      if (idx > lastIndex) {
+        frag.appendChild(document.createTextNode(text.slice(lastIndex, idx)));
+      }
+
+      const urlForExt = url.split('#')[0].split('?')[0];
+      const isImg = /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(urlForExt);
+      const isVideo = /\.(mp4|webm|ogg|ogv|mov|m4v)$/i.test(urlForExt);
+      if (isImg) {
+        const wrap = document.createElement('div');
+        wrap.className = 'inline-img-wrap';
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = 'image';
+        img.className = 'inline-msg-img';
+        img.loading = 'lazy';
+        img.style.maxWidth = '200px';
+        img.style.maxHeight = '200px';
+        img.style.borderRadius = '8px';
+        img.style.cursor = 'pointer';
+        img.addEventListener('click', () => {
+          const modal = document.createElement('div');
+          modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999;';
+          const large = document.createElement('img');
+          large.src = url;
+          large.style.cssText = 'max-width:90%;max-height:90%;border-radius:8px;';
+          modal.appendChild(large);
+          modal.addEventListener('click', () => document.body.removeChild(modal));
+          document.body.appendChild(modal);
+        });
+        wrap.appendChild(img);
+        frag.appendChild(wrap);
+      } else if (isVideo) {
+        const wrap = document.createElement('div');
+        wrap.className = 'inline-video-wrap';
+        wrap.style.maxWidth = '260px';
+        const video = document.createElement('video');
+        video.src = url;
+        video.controls = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        video.className = 'inline-msg-video';
+        video.style.cssText = 'width:100%;max-height:220px;border-radius:8px;background:#000;';
+        wrap.appendChild(video);
+        frag.appendChild(wrap);
+      } else {
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = url;
+        frag.appendChild(a);
+      }
+
+      lastIndex = idx + url.length;
+    }
+    if (lastIndex < text.length) {
+      frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+    }
+    if (!frag.childNodes.length) return document.createTextNode(text);
+    return frag;
+  }
+
+  function formatTs(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    if (d.toDateString() === now.toDateString()) return hm;
+    if (d.getFullYear() === now.getFullYear()) return `${d.getMonth()+1}月${d.getDate()}日 ${hm}`;
+    return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日 ${hm}`;
+  }
+
+  // 构建单条消息行；sending=true 时显示"发送中"加载态
+  function buildMessageRow(sender, text, ts, sending = false) {
+    const isMe = sender === currentUser;
+    const row = document.createElement('div');
+    row.className = 'msg-row ' + (isMe ? 'msg-right' : 'msg-left');
+    if (sending) row.classList.add('msg-sending');
+    if (ts) row.dataset.ts = ts;
+
+    const avWrap = makeAvatarDOM(sender, isMe ? myAvatar : (avatarCache[sender] || ''), 44);
+
+    const col = document.createElement('div');
+    col.className = 'msg-col';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble ' + (isMe ? 'me' : 'you');
+
+    // 复制按钮（hover 气泡时显示）
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'msg-copy-btn';
+    copyBtn.title = '复制';
+    copyBtn.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    copyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const raw = bubble.dataset.rawText || text || '';
+      navigator.clipboard.writeText(raw).then(() => toast('已复制')).catch(() => toast('复制失败'));
+    });
+
+    const content = createMessageContentNode(text || '');
+    bubble.appendChild(content);
+    bubble.dataset.rawText = text || '';
+    col.appendChild(bubble);
+    col.appendChild(copyBtn);
+
+    if (ts) {
+      const time = document.createElement('div');
+      time.className = 'msg-time';
+      time.textContent = formatTs(ts);
+      col.appendChild(time);
+    }
+
+    // 发送中：气泡角落加个小转圈
+    if (sending) {
+      const spin = document.createElement('div');
+      spin.className = 'msg-spinner';
+      col.appendChild(spin);
+    }
+
+    if (isMe) {
+      row.style.justifyContent = 'flex-end';
+      row.appendChild(col);
+      row.appendChild(avWrap);
+    } else {
+      row.style.justifyContent = 'flex-start';
+      row.appendChild(avWrap);
+      row.appendChild(col);
+    }
+    return row;
+  }
+
+  function addMessageToWindow(sender, text, ts, sending = false) {
+    if(!chatWindow) return null;
+    const row = buildMessageRow(sender, text, ts, sending);
+    chatWindow.appendChild(row);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    return row;
+  }
+
+  async function loadEarlierMessages() {
+    if (!currentUser || !currentFriend || !chatState.hasMore || chatState.loading) return;
+    if (!chatState.oldestId) { chatState.hasMore = false; return; }
+    chatState.loading = true;
+    try {
+      const r = await fetch(`/messages/${encodeURIComponent(currentUser)}/${encodeURIComponent(currentFriend)}?limit=100&before=${chatState.oldestId}`);
+      const list = await r.json();
+      if (!list.length) { chatState.hasMore = false; return; }
+      const prevHeight = chatWindow.scrollHeight;
+      const prevScrollTop = chatWindow.scrollTop;
+      const frag = document.createDocumentFragment();
+      list.forEach(m => frag.appendChild(buildMessageRow(m.from_user, m.message, m.ts)));
+      chatWindow.insertBefore(frag, chatWindow.firstChild);
+      chatState.oldestId = list[0].id;
+      if (list.length < 100) chatState.hasMore = false;
+      chatWindow.scrollTop = prevScrollTop + (chatWindow.scrollHeight - prevHeight);
+    } catch (e) { }
+    finally { chatState.loading = false; }
+  }
+
+  // --------------- 发送消息 ---------------
+  function sendMessage(text) {
+    if (!currentFriend) { toast('请选择会话'); return; }
+    if (!text) return;
+    if (!socket || !socket.connected) { toast('连接已断开，消息未发送'); return; }
+    const ts = Date.now();
+    const payload = { from: currentUser, to: currentFriend, message: text };
+    socket.emit('send-message', payload);
+    // 本地先渲染，带"发送中"态，等 ack 后去掉
+    addMessageToWindow(currentUser, text, ts, true);
+    updateConversationPreview(currentFriend, { from_user: currentUser, message: text, type: 'text', ts });
+    if(msgInput) msgInput.value = '';
+  }
+
+  // --------------- 事件绑定：文本发送 ---------------
+  if(btnSendText) btnSendText.addEventListener('click', () => sendMessage(msgInput.value.trim()));
+  if(msgInput) msgInput.addEventListener('keydown', (e) => { if(e.key === 'Enter') sendMessage(msgInput.value.trim()); });
+
+  // --------------- 事件绑定：图片选择 & 自动上传 ---------------
+  const btnMore = document.getElementById('btnMore');
+  const imageRow = document.getElementById('imageRow');
+  if (btnMore && imageRow) btnMore.addEventListener('click', () => imageRow.classList.toggle('open'));
+
+  const btnSendImage = document.getElementById('btnSendImage');
+  if (btnSendImage && imgUpload) btnSendImage.addEventListener('click', () => imgUpload.click());
+
+  if(imgUpload) {
+    imgUpload.addEventListener('change', async (e) => {
+      const fileInput = e.target;
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      if (!currentUser || !currentFriend) { toast('请先选择会话'); fileInput.value = ''; return; }
+      if (!socket || !socket.connected) { toast('连接已断开'); fileInput.value = ''; return; }
+
+      // 先加一个占位气泡显示上传进度
+      const ts = Date.now();
+      const placeholder = addMessageToWindow(currentUser, '[上传中 0%]', ts, true);
+
+      const compressed = await compressImage(file);
+      const url = await uploadImage(compressed, (pct) => {
+        const bubble = placeholder && placeholder.querySelector('.bubble');
+        if (bubble) bubble.textContent = `[上传中 ${pct}%]`;
+      });
+
+      if (!url) {
+        if (placeholder) placeholder.remove();
+        toast('上传失败');
+        fileInput.value = '';
+        return;
+      }
+
+      // 替换占位气泡为真实图片消息
+      if (placeholder) placeholder.remove();
+      addMessageToWindow(currentUser, url, ts, true);
+      const payload = { from: currentUser, to: currentFriend, message: url, type: 'image' };
+      socket.emit('send-message', payload);
+      updateConversationPreview(currentFriend, { from_user: currentUser, message: url, type: 'image', ts });
+      fileInput.value = '';
+    });
+  }
+
+  // --------------- 编辑备注 / 添加好友 / 头像保存 ---------------
+  function editRemarkForFriend(f){
+    const cur = friends.find(x=>x.friend===f); const curR = cur?cur.remark:'';
+    const r = prompt('设置备注（留空则取消）', curR);
+    if(r===null) return;
+    fetch('/set-remark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({owner:currentUser,friend:f,remark:r})})
+      .then(res=>res.json()).then(j=>{ if(j.success){ loadFriends(); throttleLoadConversations(); } else toast('设置失败', 'error'); })
+      .catch(()=>toast('请求失败', 'error'));
+  }
+
+  if(btnAdd) btnAdd.addEventListener('click', ()=> {
+    const t = newFriendInput.value.trim();
+    if(!t){ toast('请输入好友用户名'); return; }
+    fetch('/add-friend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:currentUser,friend:t})})
+      .then(r=>r.json()).then(res=>{ if(res.success){ newFriendInput.value=''; toast('已添加'); loadFriends(); throttleLoadConversations(); } else toast('添加失败: '+(res.msg||''), 'error'); })
+      .catch(()=>toast('添加好友失败', 'error'));
+  });
+
+  if(btnSaveAvatar) btnSaveAvatar.addEventListener('click', ()=> {
+    const url = avatarInput.value.trim();
+    fetch('/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:currentUser,avatar:url})})
+      .then(r=>r.json()).then(res=>{ if(res.success){ myAvatar = url || ''; avatarCache[currentUser] = myAvatar; renderMyAvatar(); loadFriends(); throttleLoadConversations(); toast('头像已保存'); } else toast('保存失败', 'error'); })
+      .catch(()=>toast('保存头像失败', 'error'));
+  });
+
+  const avatarUpload = document.getElementById('avatarUpload');
+  const btnUploadAvatar = document.getElementById('btnUploadAvatar');
+  if (btnUploadAvatar && avatarUpload) btnUploadAvatar.addEventListener('click', () => avatarUpload.click());
+  if (avatarUpload) {
+    avatarUpload.addEventListener('change', async (e) => {
+      const fileInput = e.target;
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      const url = await uploadImage(file);
+      if (!url) { toast('头像上传失败', 'error'); fileInput.value = ''; return; }
+      avatarInput.value = url;
+      try {
+        const r = await fetch('/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:currentUser,avatar:url})});
+        const res = await r.json();
+        if (res.success) {
+          myAvatar = url;
+          avatarCache[currentUser] = myAvatar;
+          renderMyAvatar();
+          loadFriends();
+          throttleLoadConversations();
+          toast('头像已更新');
+        } else toast('保存失败', 'error');
+      } catch (err) { toast('保存失败', 'error'); }
+      fileInput.value = '';
+    });
+  }
+
+  // 通知设置：显示当前权限状态，提供手动开启入口
+  const btnNotifyToggle = document.getElementById('btnNotifyToggle');
+  const notifyStatus = document.getElementById('notifyStatus');
+
+  function refreshNotifyStatus() {
+    if (!notifyStatus || !btnNotifyToggle) return;
+    const p = Notification.permission;
+    if (p === 'granted') {
+      notifyStatus.textContent = '已开启，收到新消息会弹系统通知';
+      notifyStatus.style.color = '#22c55e';
+      btnNotifyToggle.style.display = 'none';
+    } else if (p === 'denied') {
+      notifyStatus.textContent = '浏览器已拦截通知。请点地址栏左边的锁/设置图标，把"通知"改成允许，再刷新页面';
+      notifyStatus.style.color = '#ef4444';
+      btnNotifyToggle.style.display = 'none';
+    } else {
+      notifyStatus.textContent = '未开启。开启后即使切到别的标签页也能收到提醒';
+      notifyStatus.style.color = '';
+      btnNotifyToggle.style.display = '';
+    }
+  }
+
+  if (btnNotifyToggle) {
+    btnNotifyToggle.addEventListener('click', async () => {
+      const p = await Notification.requestPermission();
+      refreshNotifyStatus();
+      if (p === 'granted') toast('通知已开启', 'success');
+      else if (p === 'denied') toast('浏览器拒绝了，需手动去站点设置里改', 'error');
+    });
+  }
+  refreshNotifyStatus();
+
+  if(btnRegister) btnRegister.addEventListener('click', async () => {
+    const u = document.getElementById('li-username').value.trim();
+    const p = document.getElementById('li-password').value;
+    const c = document.getElementById('li-code').value.trim();
+    if(!u||!p){ toast('用户名/密码不能为空'); return; }
+    if(!c){ toast('请填写邀请码'); return; }
+    try {
+      const r = await fetch('/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p,code:c})});
+      const res = await r.json();
+      toast(res.success ? '注册成功，请登录' : ('注册失败: ' + (res.msg||'')), res.success ? 'success' : 'error');
+    } catch(e) { toast('注册请求失败', 'error'); }
+  });
+
+  if(btnLogin) btnLogin.addEventListener('click', async () => {
+    const u = document.getElementById('li-username').value.trim();
+    const p = document.getElementById('li-password').value;
+    if(!u||!p){ toast('用户名/密码不能为空'); return; }
+    try {
+      const r = await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
+      const res = await r.json();
+      if(res.success){
+        currentUser = res.user.username;
+        myAvatar = res.user.avatar || '';
+        localStorage.setItem('chat_currentUser', currentUser);
+        localStorage.setItem('chat_myAvatar', myAvatar || '');
+        avatarCache[currentUser] = myAvatar;
+        document.getElementById('meName').textContent = currentUser;
+        avatarInput.value = myAvatar;
+        renderMyAvatar();
+        // 登录后先清空本地未读缓存，等服务端 unread-counts 回来再填正确值
+        unreadMap = {};
+        localStorage.removeItem('chat_unreadMap');
+        connectSocket();
+        // 登录后立刻请求通知权限（用户刚交互过，浏览器允许弹）
+        if (Notification.permission === 'default') Notification.requestPermission();
+        await loadFriends();
+        throttleLoadConversations();
+        meNote.value = DEV_NOTE;
+        showApp();
+        document.getElementById('li-password').value = '';
+        toast('欢迎回来，' + currentUser, 'success');
+      } else toast('登录失败: ' + (res.msg||''), 'error');
+    } catch(e) { toast('登录请求失败', 'error'); }
+  });
+
+  // Auto-login
+  (function tryAutoLogin(){
+    const stored = localStorage.getItem('chat_currentUser');
+    const storedAvatar = localStorage.getItem('chat_myAvatar') || '';
+    if(stored){
+      currentUser = stored;
+      myAvatar = storedAvatar;
+      avatarCache[currentUser] = myAvatar;
+      document.getElementById('meName').textContent = currentUser;
+      avatarInput.value = myAvatar;
+      renderMyAvatar();
+      unreadMap = {};
+      localStorage.removeItem('chat_unreadMap');
+      connectSocket();
+      // 自动登录后也请求一次通知权限
+      if (Notification.permission === 'default') Notification.requestPermission();
+      loadFriends().then(()=>{ throttleLoadConversations(); });
+      meNote.value = DEV_NOTE;
+      showApp();
+      document.getElementById('li-password').value = '';
+    } else {
+      showLogin();
+    }
+  })();
+
+  // Logout
+  if(btnLogout) btnLogout.addEventListener('click', ()=> {
+    if(currentUser) localStorage.setItem('chat_lastUser', currentUser);
+    localStorage.removeItem('chat_currentUser');
+    localStorage.removeItem('chat_myAvatar');
+    try{ if(socket){ socket.emit('logout', currentUser); socket.disconnect(); } }catch(e){}
+    location.reload();
+  });
+
+  window.currentUser = () => currentUser;
+  window.currentFriend = () => currentFriend;
+  window.socket = () => socket;
+})();
